@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>A股分析智能体</title>
+    <link rel="stylesheet" href="./styles.css?v=20260814-1" />
+  </head>
+  <body class="booting">
+    <section class="boot-screen" id="bootScreen" aria-label="启动中">
+      <div class="boot-panel">
+        <div class="brand-mark">M</div>
+        <div class="boot-copy">
+          <strong>A股分析智能体</strong>
+          <span>正在恢复会话</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="login-screen" id="loginScreen" hidden>
+      <form class="login-panel" id="loginForm">
+        <div class="brand login-brand">
+          <div class="brand-mark">M</div>
+          <div>
+            <h1>A股分析智能体</h1>
+            <p>A股公司研究智能体</p>
+          </div>
+        </div>
+        <div class="login-copy">
+          <h2>登录后开始研究</h2>
+          <p>当前环境使用后端预置测试用户。</p>
+        </div>
+        <label>
+          <span>用户名</span>
+          <input id="usernameInput" autocomplete="username" value="alice" />
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="passwordInput" type="password" autocomplete="current-password" value="alice123" />
+        </label>
+        <button id="loginButton" type="submit">登录</button>
+        <div class="login-error" id="loginError" role="alert"></div>
+      </form>
+    </section>
+
+    <div class="app-shell" id="appShell" hidden>
+      <aside class="sidebar" aria-label="会话历史">
+        <div class="sidebar-head">
+          <div class="brand">
+            <div class="brand-mark">M</div>
+            <div class="brand-copy">
+              <h1>A股分析智能体</h1>
+              <p>A股公司研究智能体</p>
+            </div>
+          </div>
+          <button class="new-chat-button" id="newChatButton" type="button" aria-label="新对话">
+            <span class="new-chat-icon">+</span>
+          </button>
+        </div>
+
+        <div class="history-label">历史对话</div>
+        <nav class="session-list" id="sessionList" aria-label="历史对话"></nav>
+
+        <div class="sidebar-footer">
+          <div class="user-menu" id="userMenu">
+            <button class="user-avatar-button" id="userMenuButton" type="button" aria-label="用户菜单">
+              <span id="userInitial">A</span>
+            </button>
+            <div class="user-popover" id="userPopover" hidden>
+              <div class="user-popover-name" id="userName">Alice</div>
+              <button id="logoutButton" type="button">退出登录</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="chat-column" aria-label="对话">
+        <div class="messages" id="messages" aria-live="polite"></div>
+
+        <form class="composer" id="composer">
+          <div class="composer-box">
+            <textarea id="queryInput" rows="1" placeholder="输入问题，按 Enter 发送"></textarea>
+            <button id="sendButton" type="submit" aria-label="发送">发送</button>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <script src="./app.js?v=20260814-1"></script>
+  </body>
+</html>

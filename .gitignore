@@ -1,0 +1,5 @@
+.venv/
+_data/
+ashare_agent/config/.env
+.cache/
+.artifacts/
