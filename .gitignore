@@ -4,3 +4,5 @@ _data/
 ashare_agent/config/.env
 .cache/
 .artifacts/
+__pycache__/
+*.py[cod]
