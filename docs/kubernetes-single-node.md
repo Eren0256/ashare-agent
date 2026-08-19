@@ -244,13 +244,38 @@ kubectl -n ashare-agent exec postgres-0 -- sh -c \
 /var/lib/ashare-agent/artifacts
 ```
 
-只删除业务工作负载、保留 PV 数据：
+项目提供三个默认只预览、必须显式传入 `--execute` 的清理脚本。
+
+一级：停止所有应用 Pod，保留 namespace、PVC/PV 数据、KEDA 和集群：
 
 ```bash
-kubectl delete namespace ashare-agent
+./scripts/cleanup-stop-application.sh
+./scripts/cleanup-stop-application.sh --execute
 ```
 
-该命令不会删除集群级 KEDA 组件；KEDA 可以继续供同一集群中的其他 namespace 使用。
+恢复一级停服后的应用：
+
+```bash
+./scripts/deploy-kubernetes.sh
+```
+
+二级：删除应用 namespace、PV/StorageClass 和 `/var/lib/ashare-agent` 数据，但保留
+Kubernetes、Calico 和 KEDA：
+
+```bash
+sudo -E ./scripts/cleanup-delete-application.sh
+sudo -E ./scripts/cleanup-delete-application.sh --execute
+```
+
+三级：先执行二级清理，再卸载 KEDA、Calico/kubeadm、Kubernetes apt 包、CRI 镜像，
+并恢复 swap、UFW、NetworkManager 和 containerd 的 Kubernetes 专用配置：
+
+```bash
+sudo -E ./scripts/cleanup-kubernetes-host.sh
+sudo -E ./scripts/cleanup-kubernetes-host.sh --execute
+```
+
+三级脚本保留 Docker、containerd、原有代理、源码、`.venv` 和本地 `.env` 文件。
 
 `kubeadm reset`、删除 `/var/lib/ashare-agent` 或删除 `/var/lib/etcd` 都属于破坏性操作。
 不要把它们当作普通的“停止服务”命令；确实要卸载整个集群或销毁数据时，应先备份并
