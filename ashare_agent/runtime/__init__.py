@@ -2,10 +2,14 @@ from .agent import (
     AShareAgentRuntime,
     AgentRuntimeProtocol,
 )
-from .jobs import AgentJobService
+from .jobs import (
+    AgentWorker,
+    JobSubmissionService,
+)
 
 __all__ = [
     "AShareAgentRuntime",
-    "AgentJobService",
+    "AgentWorker",
     "AgentRuntimeProtocol",
+    "JobSubmissionService",
 ]

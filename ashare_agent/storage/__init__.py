@@ -1,3 +1,4 @@
+from .artifact_store import FileSystemArtifactStore
 from .database import AppDatabase
 from .models import (
     ArtifactRecord,
@@ -18,6 +19,7 @@ __all__ = [
     "AppDatabase",
     "ApplicationRepository",
     "ArtifactRecord",
+    "FileSystemArtifactStore",
     "JobRecord",
     "JobStatus",
     "MessageRecord",

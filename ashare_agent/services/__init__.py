@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 from .security import (
     SecurityService,
 )
@@ -43,12 +45,26 @@ def create_default_company_service() -> CompanyService:
 
 
 def _create_default_dependencies():
-    from ashare_agent.cache import SqliteCacheStore
     from ashare_agent.config import get_settings
 
     settings = get_settings()
-    cache = SqliteCacheStore(settings.cache_db_path)
-    return settings, cache
+    return settings, _create_default_cache()
+
+
+@lru_cache
+def _create_default_cache():
+    from ashare_agent.cache import RedisCacheStore
+    from ashare_agent.config import get_settings
+
+    settings = get_settings()
+    return RedisCacheStore(
+        settings.cache_redis_url,
+        key_prefix=settings.cache_key_prefix,
+        lock_ttl_seconds=settings.cache_lock_ttl_seconds,
+        lock_wait_timeout_seconds=(
+            settings.cache_lock_wait_timeout_seconds
+        ),
+    )
 
 
 def _create_security_service(cache, settings) -> SecurityService:

@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 from fastapi.testclient import TestClient
@@ -6,6 +7,8 @@ from ashare_agent.agent import AgentResponse
 from ashare_agent.api.container import create_container
 from ashare_agent.api.main import create_app
 from ashare_agent.config import Settings
+from ashare_agent.worker import create_worker
+from tests.support import MemoryJobQueue
 
 
 class RecordingRuntime:
@@ -38,18 +41,26 @@ def _wait_for_job(
 
 def test_authenticated_conversation_persists_messages_and_context(tmp_path):
     runtime = RecordingRuntime()
+    queue = MemoryJobQueue()
     settings = Settings(
         deepseek_api_key="test-key",
         deepseek_api_base="https://example.invalid",
         deepseek_model="test-model",
-        app_db_path=tmp_path / "app.sqlite3",
-        cache_db_path=tmp_path / "cache.sqlite3",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'app.sqlite3'}",
+        database_auto_create_schema=True,
         chart_artifact_dir=tmp_path / "charts",
         demo_username="alice",
         demo_password="alice123",
         demo_display_name="Alice",
     )
-    app = create_app(create_container(settings=settings, runtime=runtime))
+    container = create_container(settings=settings, queue=queue)
+    worker = create_worker(
+        name="test-worker",
+        settings=settings,
+        runtime=runtime,
+        queue=queue,
+    )
+    app = create_app(container)
 
     with TestClient(app) as client:
         unauthorized = client.get("/sessions")
@@ -73,6 +84,7 @@ def test_authenticated_conversation_persists_messages_and_context(tmp_path):
             json={"query": "查询贵州茅台的主营业务"},
         )
         assert first.status_code == 202
+        assert asyncio.run(worker.process_next()) is True
         first_job = _wait_for_job(client, headers, first.json()["job_id"])
         assert first_job["status"] == "succeeded"
         assert first_job["result"]["reply"] == "基线回答：查询贵州茅台的主营业务"
@@ -83,6 +95,7 @@ def test_authenticated_conversation_persists_messages_and_context(tmp_path):
             json={"query": "再查询它的净利润"},
         )
         assert second.status_code == 202
+        assert asyncio.run(worker.process_next()) is True
         second_job = _wait_for_job(client, headers, second.json()["job_id"])
         assert second_job["status"] == "succeeded"
 

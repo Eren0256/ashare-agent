@@ -1,12 +1,17 @@
 import base64
+from collections.abc import Mapping
 from datetime import UTC, datetime
 import json
-import sqlite3
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import delete, insert, or_, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection
+
 from ashare_agent.domain import ChartArtifact
 
+from .artifact_store import FileSystemArtifactStore
 from .database import AppDatabase
 from .models import (
     ArtifactRecord,
@@ -17,6 +22,7 @@ from .models import (
     SubmittedTurn,
     UserRecord,
 )
+from .schema import artifacts, job_outbox, jobs, messages, sessions, users
 
 
 class SessionNotFoundError(LookupError):
@@ -28,8 +34,21 @@ class SessionBusyError(RuntimeError):
 
 
 class ApplicationRepository:
-    def __init__(self, database: AppDatabase):
+    def __init__(
+        self,
+        database: AppDatabase,
+        artifact_store: FileSystemArtifactStore | None = None,
+    ):
         self.database = database
+        self.artifact_store = artifact_store or FileSystemArtifactStore(
+            ".artifacts/charts"
+        )
+
+    async def initialize(self) -> None:
+        await self.database.initialize()
+
+    async def close(self) -> None:
+        await self.database.close()
 
     async def create_user(
         self,
@@ -37,64 +56,64 @@ class ApplicationRepository:
         display_name: str,
         password_hash: str,
     ) -> UserRecord:
-        def operation(connection: sqlite3.Connection) -> UserRecord:
-            existing = connection.execute(
-                "SELECT * FROM users WHERE username = ?",
-                (username,),
-            ).fetchone()
-            if existing is not None:
-                return _user(existing)
-
-            user = UserRecord(
-                id=uuid4().hex,
-                username=username,
-                display_name=display_name,
-                password_hash=password_hash,
-            )
-            connection.execute(
-                """
-                INSERT INTO users (
-                    id, username, display_name, password_hash,
-                    is_active, created_at
-                ) VALUES (?, ?, ?, ?, 1, ?)
-                """,
-                (
-                    user.id,
-                    user.username,
-                    user.display_name,
-                    user.password_hash,
-                    _now(),
-                ),
-            )
-            return user
-
-        return await self.database.run(operation)
+        user = UserRecord(
+            id=uuid4().hex,
+            username=username,
+            display_name=display_name,
+            password_hash=password_hash,
+        )
+        try:
+            async with self.database.transaction() as connection:
+                existing = (
+                    await connection.execute(
+                        select(users).where(users.c.username == username)
+                    )
+                ).mappings().first()
+                if existing is not None:
+                    return _user(existing)
+                await connection.execute(
+                    insert(users).values(
+                        id=user.id,
+                        username=user.username,
+                        display_name=user.display_name,
+                        password_hash=user.password_hash,
+                        is_active=True,
+                        created_at=_now(),
+                    )
+                )
+                return user
+        except IntegrityError:
+            async with self.database.transaction() as connection:
+                existing = (
+                    await connection.execute(
+                        select(users).where(users.c.username == username)
+                    )
+                ).mappings().first()
+                if existing is not None:
+                    return _user(existing)
+            raise
 
     async def get_user_by_username(
         self,
         username: str,
     ) -> UserRecord | None:
-        return await self.database.run(
-            lambda connection: _optional_user(
-                connection.execute(
-                    "SELECT * FROM users WHERE username = ?",
-                    (username,),
-                ).fetchone()
-            )
-        )
+        async with self.database.transaction() as connection:
+            row = (
+                await connection.execute(
+                    select(users).where(users.c.username == username)
+                )
+            ).mappings().first()
+            return _optional_user(row)
 
     async def get_user_by_id(
         self,
         user_id: str,
     ) -> UserRecord | None:
-        return await self.database.run(
-            lambda connection: _optional_user(
-                connection.execute(
-                    "SELECT * FROM users WHERE id = ?",
-                    (user_id,),
-                ).fetchone()
-            )
-        )
+        async with self.database.transaction() as connection:
+            row = (
+                await connection.execute(select(users).where(users.c.id == user_id))
+            ).mappings().first()
+            return _optional_user(row)
 
     async def create_session(
         self,
@@ -108,64 +127,64 @@ class ApplicationRepository:
             created_at=now,
             updated_at=now,
         )
-
-        def operation(connection: sqlite3.Connection) -> SessionRecord:
-            connection.execute(
-                """
-                INSERT INTO sessions (
-                    id, user_id, title, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    session.id,
-                    session.user_id,
-                    session.title,
-                    session.created_at,
-                    session.updated_at,
-                ),
-            )
-            return session
-
-        return await self.database.run(operation)
+        async with self.database.transaction() as connection:
+            await connection.execute(insert(sessions).values(**session.model_dump()))
+        return session
 
     async def get_session(
         self,
         user_id: str,
         session_id: str,
     ) -> SessionRecord | None:
-        return await self.database.run(
-            lambda connection: _optional_session(
-                connection.execute(
-                    "SELECT * FROM sessions WHERE id = ? AND user_id = ?",
-                    (session_id, user_id),
-                ).fetchone()
-            )
-        )
+        async with self.database.transaction() as connection:
+            row = (
+                await connection.execute(
+                    select(sessions).where(
+                        sessions.c.id == session_id,
+                        sessions.c.user_id == user_id,
+                    )
+                )
+            ).mappings().first()
+            return _optional_session(row)
 
     async def delete_session(
         self,
         user_id: str,
         session_id: str,
     ) -> bool:
-        def operation(connection: sqlite3.Connection) -> bool:
-            active_job = connection.execute(
-                """
-                SELECT id FROM jobs
-                WHERE session_id = ? AND user_id = ?
-                  AND status IN ('queued', 'running')
-                LIMIT 1
-                """,
-                (session_id, user_id),
-            ).fetchone()
+        async with self.database.transaction() as connection:
+            session_row = (
+                await connection.execute(
+                    select(sessions.c.id)
+                    .where(
+                        sessions.c.id == session_id,
+                        sessions.c.user_id == user_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if session_row is None:
+                return False
+            active_job = (
+                await connection.execute(
+                    select(jobs.c.id)
+                    .where(
+                        jobs.c.session_id == session_id,
+                        jobs.c.user_id == user_id,
+                        jobs.c.status.in_(["queued", "running"]),
+                    )
+                    .limit(1)
+                )
+            ).first()
             if active_job is not None:
                 raise SessionBusyError(session_id)
-            cursor = connection.execute(
-                "DELETE FROM sessions WHERE id = ? AND user_id = ?",
-                (session_id, user_id),
+            result = await connection.execute(
+                delete(sessions).where(
+                    sessions.c.id == session_id,
+                    sessions.c.user_id == user_id,
+                )
             )
-            return cursor.rowcount > 0
-
-        return await self.database.run(operation)
+            return result.rowcount > 0
 
     async def list_sessions(
         self,
@@ -175,32 +194,27 @@ class ApplicationRepository:
         cursor: str | None = None,
     ) -> dict[str, Any]:
         limit = max(1, min(limit, 50))
-
-        def operation(connection: sqlite3.Connection) -> dict[str, Any]:
-            params: list[Any] = [user_id]
-            cursor_sql = ""
-            if cursor:
-                updated_at, session_id = _decode_cursor(cursor)
-                cursor_sql = "AND (updated_at < ? OR " "(updated_at = ? AND id < ?))"
-                params.extend([updated_at, updated_at, session_id])
-            params.append(limit + 1)
-            rows = connection.execute(
-                f"""
-                SELECT * FROM sessions
-                WHERE user_id = ? {cursor_sql}
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-            items = [_session(row) for row in rows[:limit]]
-            next_cursor = None
-            if len(rows) > limit and items:
-                last = items[-1]
-                next_cursor = _encode_cursor(last.updated_at, last.id)
-            return {"items": items, "next_cursor": next_cursor}
-
-        return await self.database.run(operation)
+        statement = select(sessions).where(sessions.c.user_id == user_id)
+        if cursor:
+            updated_at, session_id = _decode_cursor(cursor)
+            statement = statement.where(
+                or_(
+                    sessions.c.updated_at < updated_at,
+                    (sessions.c.updated_at == updated_at) & (sessions.c.id < session_id),
+                )
+            )
+        statement = statement.order_by(
+            sessions.c.updated_at.desc(),
+            sessions.c.id.desc(),
+        ).limit(limit + 1)
+        async with self.database.transaction() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        items = [_session(row) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit and items:
+            last = items[-1]
+            next_cursor = _encode_cursor(last.updated_at, last.id)
+        return {"items": items, "next_cursor": next_cursor}
 
     async def list_messages(
         self,
@@ -211,170 +225,238 @@ class ApplicationRepository:
         cursor: str | None = None,
     ) -> dict[str, Any]:
         limit = max(1, min(limit, 50))
-
-        def operation(connection: sqlite3.Connection) -> dict[str, Any]:
-            _require_session(connection, user_id, session_id)
-            params: list[Any] = [session_id, user_id]
-            cursor_sql = ""
+        async with self.database.transaction() as connection:
+            await _require_session(connection, user_id, session_id)
+            statement = select(messages).where(
+                messages.c.session_id == session_id,
+                messages.c.user_id == user_id,
+            )
             if cursor:
                 created_at, message_id = _decode_cursor(cursor)
-                cursor_sql = "AND (created_at < ? OR " "(created_at = ? AND id < ?))"
-                params.extend([created_at, created_at, message_id])
-            params.append(limit + 1)
-            rows = connection.execute(
-                f"""
-                SELECT * FROM messages
-                WHERE session_id = ? AND user_id = ? {cursor_sql}
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-            newest = [_message(row) for row in rows[:limit]]
-            next_cursor = None
-            if len(rows) > limit and newest:
-                last = newest[-1]
-                next_cursor = _encode_cursor(last.created_at, last.id)
-            return {
-                "items": list(reversed(newest)),
-                "next_cursor": next_cursor,
-            }
-
-        return await self.database.run(operation)
+                statement = statement.where(
+                    or_(
+                        messages.c.created_at < created_at,
+                        (messages.c.created_at == created_at)
+                        & (messages.c.id < message_id),
+                    )
+                )
+            statement = statement.order_by(
+                messages.c.created_at.desc(),
+                messages.c.id.desc(),
+            ).limit(limit + 1)
+            rows = (await connection.execute(statement)).mappings().all()
+        newest = [_message(row) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit and newest:
+            last = newest[-1]
+            next_cursor = _encode_cursor(last.created_at, last.id)
+        return {
+            "items": list(reversed(newest)),
+            "next_cursor": next_cursor,
+        }
 
     async def submit_turn(
         self,
         user_id: str,
         session_id: str,
         question: str,
-        *,
-        context_limit: int,
     ) -> SubmittedTurn:
         question = question.strip()
         if not question:
             raise ValueError("question cannot be empty")
+        now = _now()
+        message = MessageRecord(
+            id=uuid4().hex,
+            session_id=session_id,
+            user_id=user_id,
+            role="user",
+            content=question,
+            created_at=now,
+        )
+        job = JobRecord(
+            id=uuid4().hex,
+            session_id=session_id,
+            user_id=user_id,
+            user_message_id=message.id,
+            status=JobStatus.QUEUED,
+            question=question,
+            created_at=now,
+        )
+        try:
+            async with self.database.transaction() as connection:
+                session = await _require_session(
+                    connection,
+                    user_id,
+                    session_id,
+                    for_update=True,
+                )
+                active_job = (
+                    await connection.execute(
+                        select(jobs.c.id)
+                        .where(
+                            jobs.c.session_id == session_id,
+                            jobs.c.user_id == user_id,
+                            jobs.c.status.in_(["queued", "running"]),
+                        )
+                        .limit(1)
+                    )
+                ).first()
+                if active_job is not None:
+                    raise SessionBusyError(session_id)
+                await connection.execute(
+                    insert(messages).values(
+                        id=message.id,
+                        session_id=message.session_id,
+                        user_id=message.user_id,
+                        role=message.role,
+                        content=message.content,
+                        metadata_json={},
+                        created_at=message.created_at,
+                    )
+                )
+                await connection.execute(
+                    insert(jobs).values(
+                        id=job.id,
+                        session_id=job.session_id,
+                        user_id=job.user_id,
+                        user_message_id=job.user_message_id,
+                        status=job.status.value,
+                        question=job.question,
+                        created_at=job.created_at,
+                    )
+                )
+                await connection.execute(
+                    insert(job_outbox).values(
+                        id=uuid4().hex,
+                        job_id=job.id,
+                        created_at=now,
+                    )
+                )
+                title = session.title
+                if title == "新对话":
+                    title = _session_title(question)
+                await connection.execute(
+                    update(sessions)
+                    .where(
+                        sessions.c.id == session_id,
+                        sessions.c.user_id == user_id,
+                    )
+                    .values(title=title, updated_at=now)
+                )
+        except IntegrityError as exc:
+            if "uq_jobs_one_active_per_session" in str(exc):
+                raise SessionBusyError(session_id) from exc
+            raise
+        return SubmittedTurn(job=job, user_message=message)
 
-        def operation(connection: sqlite3.Connection) -> SubmittedTurn:
-            session = _require_session(connection, user_id, session_id)
-            active_job = connection.execute(
-                """
-                SELECT id FROM jobs
-                WHERE session_id = ? AND user_id = ?
-                  AND status IN ('queued', 'running')
-                LIMIT 1
-                """,
-                (session_id, user_id),
-            ).fetchone()
-            if active_job is not None:
-                raise SessionBusyError(session_id)
+    async def list_pending_job_dispatches(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[str]:
+        limit = max(1, min(limit, 1_000))
+        async with self.database.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    select(job_outbox.c.job_id)
+                    .where(job_outbox.c.published_at.is_(None))
+                    .order_by(job_outbox.c.created_at, job_outbox.c.id)
+                    .limit(limit)
+                )
+            ).all()
+            return [row.job_id for row in rows]
 
-            context_rows = connection.execute(
-                """
-                SELECT * FROM messages
-                WHERE session_id = ? AND user_id = ?
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                (session_id, user_id, max(0, context_limit)),
-            ).fetchall()
+    async def mark_job_dispatched(
+        self,
+        job_id: str,
+        broker_message_id: str,
+    ) -> None:
+        async with self.database.transaction() as connection:
+            await connection.execute(
+                update(job_outbox)
+                .where(
+                    job_outbox.c.job_id == job_id,
+                    job_outbox.c.published_at.is_(None),
+                )
+                .values(
+                    broker_message_id=broker_message_id,
+                    published_at=_now(),
+                )
+            )
+
+    async def claim_job(
+        self,
+        job_id: str,
+        *,
+        context_limit: int,
+        allow_running: bool = False,
+    ) -> SubmittedTurn | None:
+        if context_limit < 0:
+            raise ValueError("context_limit cannot be negative")
+        async with self.database.transaction() as connection:
+            claimed = (
+                await connection.execute(
+                    update(jobs)
+                    .where(jobs.c.id == job_id, jobs.c.status == "queued")
+                    .values(status="running", started_at=_now())
+                    .returning(jobs)
+                )
+            ).mappings().first()
+            if claimed is None:
+                claimed = (
+                    await connection.execute(select(jobs).where(jobs.c.id == job_id))
+                ).mappings().first()
+                if claimed is None:
+                    raise KeyError(job_id)
+                if claimed["status"] != "running" or not allow_running:
+                    return None
+            job = _job(claimed)
+            message_row = (
+                await connection.execute(
+                    select(messages).where(messages.c.id == job.user_message_id)
+                )
+            ).mappings().first()
+            if message_row is None:
+                raise KeyError(job.user_message_id)
+            context_rows = (
+                await connection.execute(
+                    select(messages)
+                    .where(
+                        messages.c.session_id == job.session_id,
+                        messages.c.user_id == job.user_id,
+                        messages.c.id != job.user_message_id,
+                    )
+                    .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+                    .limit(context_limit)
+                )
+            ).mappings().all()
             context = [
                 {"role": item.role, "content": item.content}
                 for item in reversed([_message(row) for row in context_rows])
             ]
-
-            now = _now()
-            message = MessageRecord(
-                id=uuid4().hex,
-                session_id=session_id,
-                user_id=user_id,
-                role="user",
-                content=question,
-                created_at=now,
-            )
-            job = JobRecord(
-                id=uuid4().hex,
-                session_id=session_id,
-                user_id=user_id,
-                user_message_id=message.id,
-                status=JobStatus.QUEUED,
-                question=question,
-                created_at=now,
-            )
-            connection.execute(
-                """
-                INSERT INTO messages (
-                    id, session_id, user_id, role, content,
-                    metadata_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, '{}', ?)
-                """,
-                (
-                    message.id,
-                    session_id,
-                    user_id,
-                    message.role,
-                    message.content,
-                    now,
-                ),
-            )
-            connection.execute(
-                """
-                INSERT INTO jobs (
-                    id, session_id, user_id, user_message_id,
-                    status, question, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    job.id,
-                    session_id,
-                    user_id,
-                    message.id,
-                    job.status.value,
-                    question,
-                    now,
-                ),
-            )
-            title = session.title
-            if title == "新对话":
-                title = _session_title(question)
-            connection.execute(
-                """
-                UPDATE sessions
-                SET title = ?, updated_at = ?
-                WHERE id = ? AND user_id = ?
-                """,
-                (title, now, session_id, user_id),
-            )
             return SubmittedTurn(
                 job=job,
-                user_message=message,
+                user_message=_message(message_row),
                 context=context,
             )
-
-        return await self.database.run(operation)
-
-    async def mark_job_running(self, job_id: str) -> JobRecord:
-        def operation(connection: sqlite3.Connection) -> JobRecord:
-            connection.execute(
-                """
-                UPDATE jobs SET status = 'running', started_at = ?
-                WHERE id = ? AND status = 'queued'
-                """,
-                (_now(), job_id),
-            )
-            return _require_job(connection, job_id)
-
-        return await self.database.run(operation)
 
     async def complete_job(
         self,
         job_id: str,
         text: str,
-        artifacts: list[ChartArtifact],
+        chart_artifacts: list[ChartArtifact],
     ) -> JobRecord:
-        def operation(connection: sqlite3.Connection) -> JobRecord:
-            job = _require_job(connection, job_id)
+        async with self.database.transaction() as connection:
+            row = (
+                await connection.execute(
+                    select(jobs).where(jobs.c.id == job_id).with_for_update()
+                )
+            ).mappings().first()
+            if row is None:
+                raise KeyError(job_id)
+            job = _job(row)
             if job.status == JobStatus.SUCCEEDED:
-                return _job_with_artifacts(connection, job)
+                return await _job_with_artifacts(connection, job)
             if job.status != JobStatus.RUNNING:
                 raise RuntimeError(f"Cannot complete job in status {job.status.value}")
 
@@ -390,188 +472,156 @@ class ApplicationRepository:
                     user_id=job.user_id,
                     title=artifact.title,
                     mime_type=artifact.mime_type,
-                    file_path=str(artifact.file_path.resolve()),
+                    storage_key=self.artifact_store.key_for(artifact.file_path),
                     width=artifact.width,
                     height=artifact.height,
                     chart_type=artifact.chart_type.value,
                     created_at=now,
                 )
-                for artifact in artifacts
+                for artifact in chart_artifacts
             ]
-            metadata = {
+            metadata_payload = {
                 "job_id": job.id,
                 "artifacts": [item.public_dict() for item in records],
             }
-            connection.execute(
-                """
-                INSERT INTO messages (
-                    id, session_id, user_id, role, content,
-                    metadata_json, created_at
-                ) VALUES (?, ?, ?, 'assistant', ?, ?, ?)
-                """,
-                (
-                    message_id,
-                    job.session_id,
-                    job.user_id,
-                    text,
-                    json.dumps(metadata, ensure_ascii=False),
-                    now,
-                ),
-            )
-            for item in records:
-                connection.execute(
-                    """
-                    INSERT INTO artifacts (
-                        id, source_artifact_id, job_id, message_id,
-                        session_id, user_id, title, mime_type,
-                        file_path, width, height, chart_type, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        item.id,
-                        item.source_artifact_id,
-                        item.job_id,
-                        item.message_id,
-                        item.session_id,
-                        item.user_id,
-                        item.title,
-                        item.mime_type,
-                        item.file_path,
-                        item.width,
-                        item.height,
-                        item.chart_type,
-                        item.created_at,
-                    ),
+            await connection.execute(
+                insert(messages).values(
+                    id=message_id,
+                    session_id=job.session_id,
+                    user_id=job.user_id,
+                    role="assistant",
+                    content=text,
+                    metadata_json=metadata_payload,
+                    created_at=now,
                 )
-            connection.execute(
-                """
-                UPDATE jobs SET
-                    status = 'succeeded', result_text = ?,
-                    assistant_message_id = ?, completed_at = ?
-                WHERE id = ?
-                """,
-                (text, message_id, now, job.id),
             )
-            connection.execute(
-                """
-                UPDATE sessions SET updated_at = ?
-                WHERE id = ? AND user_id = ?
-                """,
-                (now, job.session_id, job.user_id),
+            if records:
+                await connection.execute(
+                    insert(artifacts),
+                    [item.model_dump() for item in records],
+                )
+            updated = (
+                await connection.execute(
+                    update(jobs)
+                    .where(jobs.c.id == job.id)
+                    .values(
+                        status="succeeded",
+                        result_text=text,
+                        assistant_message_id=message_id,
+                        completed_at=now,
+                    )
+                    .returning(jobs)
+                )
+            ).mappings().one()
+            await connection.execute(
+                update(sessions)
+                .where(
+                    sessions.c.id == job.session_id,
+                    sessions.c.user_id == job.user_id,
+                )
+                .values(updated_at=now)
             )
-            return _job_with_artifacts(
-                connection,
-                _require_job(connection, job.id),
-            )
-
-        return await self.database.run(operation)
+            return _job(updated).model_copy(update={"artifacts": records})
 
     async def fail_job(
         self,
         job_id: str,
         error: Exception,
     ) -> JobRecord:
-        def operation(connection: sqlite3.Connection) -> JobRecord:
-            connection.execute(
-                """
-                UPDATE jobs SET
-                    status = 'failed', error = ?, error_type = ?,
-                    completed_at = ?
-                WHERE id = ? AND status IN ('queued', 'running')
-                """,
-                (str(error), type(error).__name__, _now(), job_id),
-            )
-            return _require_job(connection, job_id)
-
-        return await self.database.run(operation)
+        async with self.database.transaction() as connection:
+            row = (
+                await connection.execute(
+                    update(jobs)
+                    .where(
+                        jobs.c.id == job_id,
+                        jobs.c.status.in_(["queued", "running"]),
+                    )
+                    .values(
+                        status="failed",
+                        error=str(error),
+                        error_type=type(error).__name__,
+                        completed_at=_now(),
+                    )
+                    .returning(jobs)
+                )
+            ).mappings().first()
+            if row is None:
+                row = (
+                    await connection.execute(select(jobs).where(jobs.c.id == job_id))
+                ).mappings().first()
+            if row is None:
+                raise KeyError(job_id)
+            return _job(row)
 
     async def get_job(
         self,
         user_id: str,
         job_id: str,
     ) -> JobRecord | None:
-        def operation(connection: sqlite3.Connection) -> JobRecord | None:
-            row = connection.execute(
-                "SELECT * FROM jobs WHERE id = ? AND user_id = ?",
-                (job_id, user_id),
-            ).fetchone()
+        async with self.database.transaction() as connection:
+            row = (
+                await connection.execute(
+                    select(jobs).where(
+                        jobs.c.id == job_id,
+                        jobs.c.user_id == user_id,
+                    )
+                )
+            ).mappings().first()
             if row is None:
                 return None
-            return _job_with_artifacts(connection, _job(row))
-
-        return await self.database.run(operation)
+            return await _job_with_artifacts(connection, _job(row))
 
     async def get_artifact(
         self,
         user_id: str,
         artifact_id: str,
     ) -> ArtifactRecord | None:
-        return await self.database.run(
-            lambda connection: _optional_artifact(
-                connection.execute(
-                    "SELECT * FROM artifacts WHERE id = ? AND user_id = ?",
-                    (artifact_id, user_id),
-                ).fetchone()
-            )
-        )
-
-    async def fail_unfinished_jobs(self) -> int:
-        def operation(connection: sqlite3.Connection) -> int:
-            cursor = connection.execute(
-                """
-                UPDATE jobs SET
-                    status = 'failed',
-                    error = '服务重启，进程内任务已终止。',
-                    error_type = 'ServiceRestarted',
-                    completed_at = ?
-                WHERE status IN ('queued', 'running')
-                """,
-                (_now(),),
-            )
-            return cursor.rowcount
-
-        return await self.database.run(operation)
+        async with self.database.transaction() as connection:
+            row = (
+                await connection.execute(
+                    select(artifacts).where(
+                        artifacts.c.id == artifact_id,
+                        artifacts.c.user_id == user_id,
+                    )
+                )
+            ).mappings().first()
+            return _optional_artifact(row)
 
 
-def _require_session(
-    connection: sqlite3.Connection,
+async def _require_session(
+    connection: AsyncConnection,
     user_id: str,
     session_id: str,
+    *,
+    for_update: bool = False,
 ) -> SessionRecord:
-    row = connection.execute(
-        "SELECT * FROM sessions WHERE id = ? AND user_id = ?",
-        (session_id, user_id),
-    ).fetchone()
+    statement = select(sessions).where(
+        sessions.c.id == session_id,
+        sessions.c.user_id == user_id,
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    row = (await connection.execute(statement)).mappings().first()
     if row is None:
         raise SessionNotFoundError(session_id)
     return _session(row)
 
 
-def _require_job(
-    connection: sqlite3.Connection,
-    job_id: str,
-) -> JobRecord:
-    row = connection.execute(
-        "SELECT * FROM jobs WHERE id = ?",
-        (job_id,),
-    ).fetchone()
-    if row is None:
-        raise KeyError(job_id)
-    return _job(row)
-
-
-def _job_with_artifacts(
-    connection: sqlite3.Connection,
+async def _job_with_artifacts(
+    connection: AsyncConnection,
     job: JobRecord,
 ) -> JobRecord:
-    rows = connection.execute(
-        "SELECT * FROM artifacts WHERE job_id = ? ORDER BY created_at, id",
-        (job.id,),
-    ).fetchall()
+    rows = (
+        await connection.execute(
+            select(artifacts)
+            .where(artifacts.c.job_id == job.id)
+            .order_by(artifacts.c.created_at, artifacts.c.id)
+        )
+    ).mappings().all()
     return job.model_copy(update={"artifacts": [_artifact(row) for row in rows]})
 
 
-def _user(row: sqlite3.Row) -> UserRecord:
+def _user(row: Mapping[str, Any]) -> UserRecord:
     return UserRecord(
         id=row["id"],
         username=row["username"],
@@ -581,11 +631,11 @@ def _user(row: sqlite3.Row) -> UserRecord:
     )
 
 
-def _optional_user(row: sqlite3.Row | None) -> UserRecord | None:
+def _optional_user(row: Mapping[str, Any] | None) -> UserRecord | None:
     return _user(row) if row is not None else None
 
 
-def _session(row: sqlite3.Row) -> SessionRecord:
+def _session(row: Mapping[str, Any]) -> SessionRecord:
     return SessionRecord(
         id=row["id"],
         user_id=row["user_id"],
@@ -595,14 +645,18 @@ def _session(row: sqlite3.Row) -> SessionRecord:
     )
 
 
-def _optional_session(row: sqlite3.Row | None) -> SessionRecord | None:
+def _optional_session(row: Mapping[str, Any] | None) -> SessionRecord | None:
     return _session(row) if row is not None else None
 
 
-def _message(row: sqlite3.Row) -> MessageRecord:
-    try:
-        metadata = json.loads(row["metadata_json"])
-    except (TypeError, json.JSONDecodeError):
+def _message(row: Mapping[str, Any]) -> MessageRecord:
+    metadata = row["metadata_json"]
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+    if not isinstance(metadata, dict):
         metadata = {}
     return MessageRecord(
         id=row["id"],
@@ -615,7 +669,7 @@ def _message(row: sqlite3.Row) -> MessageRecord:
     )
 
 
-def _job(row: sqlite3.Row) -> JobRecord:
+def _job(row: Mapping[str, Any]) -> JobRecord:
     return JobRecord(
         id=row["id"],
         session_id=row["session_id"],
@@ -633,7 +687,7 @@ def _job(row: sqlite3.Row) -> JobRecord:
     )
 
 
-def _artifact(row: sqlite3.Row) -> ArtifactRecord:
+def _artifact(row: Mapping[str, Any]) -> ArtifactRecord:
     return ArtifactRecord(
         id=row["id"],
         source_artifact_id=row["source_artifact_id"],
@@ -643,7 +697,7 @@ def _artifact(row: sqlite3.Row) -> ArtifactRecord:
         user_id=row["user_id"],
         title=row["title"],
         mime_type=row["mime_type"],
-        file_path=row["file_path"],
+        storage_key=row["storage_key"],
         width=row["width"],
         height=row["height"],
         chart_type=row["chart_type"],
@@ -652,13 +706,13 @@ def _artifact(row: sqlite3.Row) -> ArtifactRecord:
 
 
 def _optional_artifact(
-    row: sqlite3.Row | None,
+    row: Mapping[str, Any] | None,
 ) -> ArtifactRecord | None:
     return _artifact(row) if row is not None else None
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _session_title(question: str) -> str:
@@ -666,21 +720,21 @@ def _session_title(question: str) -> str:
     return compact[:18] or "新对话"
 
 
-def _encode_cursor(timestamp: str, item_id: str) -> str:
+def _encode_cursor(timestamp: datetime, item_id: str) -> str:
     payload = json.dumps(
-        {"timestamp": timestamp, "id": item_id},
+        {"timestamp": timestamp.isoformat(), "id": item_id},
         separators=(",", ":"),
     ).encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(cursor: str) -> tuple[str, str]:
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-        timestamp = payload["timestamp"]
+        timestamp = datetime.fromisoformat(payload["timestamp"])
         item_id = payload["id"]
-        if not isinstance(timestamp, str) or not isinstance(item_id, str):
+        if not isinstance(item_id, str):
             raise ValueError
         return timestamp, item_id
     except Exception as exc:

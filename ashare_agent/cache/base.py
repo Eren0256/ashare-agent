@@ -1,3 +1,4 @@
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol
 
 
@@ -19,3 +20,8 @@ class CacheStore(Protocol):
         self,
         key: str,
     ) -> None: ...
+
+    def lock(
+        self,
+        key: str,
+    ) -> AbstractAsyncContextManager[None]: ...
