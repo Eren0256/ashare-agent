@@ -39,6 +39,7 @@ for variable_name in "${required_variables[@]}"; do
 done
 
 kubectl cluster-info >/dev/null
+"${script_dir}/install-keda.sh"
 kubectl apply -f "${manifests_dir}/namespace.yaml"
 
 temporary_dir=$(mktemp -d)
@@ -107,6 +108,8 @@ kubectl -n "${namespace}" wait --for=condition=Complete \
 kubectl -n "${namespace}" rollout status deployment/api --timeout=10m
 kubectl -n "${namespace}" rollout status deployment/worker --timeout=10m
 kubectl -n "${namespace}" rollout status deployment/frontend --timeout=10m
+kubectl -n "${namespace}" wait --for=condition=Ready \
+  scaledobject/worker-autoscaler --timeout=5m
 
 kubectl -n "${namespace}" get pods -o wide
 echo "Frontend: http://10.192.54.98:30080"

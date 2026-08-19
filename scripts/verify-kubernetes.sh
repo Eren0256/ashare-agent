@@ -2,7 +2,7 @@
 set -euo pipefail
 
 namespace=${K8S_NAMESPACE:-ashare-agent}
-expected_workers=${EXPECTED_WORKERS:-2}
+expected_workers=${EXPECTED_WORKERS:-1}
 expected_revision=20260819_03
 
 kubectl cluster-info >/dev/null
@@ -24,6 +24,17 @@ kubectl -n "${namespace}" rollout status deployment/worker --timeout=2m
 kubectl -n "${namespace}" rollout status deployment/frontend --timeout=2m
 kubectl -n "${namespace}" wait --for=condition=Complete \
   job/database-migration --timeout=2m
+kubectl -n "${namespace}" wait --for=condition=Ready \
+  scaledobject/worker-autoscaler --timeout=2m
+
+hpa_target=$(
+  kubectl -n "${namespace}" get horizontalpodautoscaler worker-autoscaler \
+    -o jsonpath='{.spec.scaleTargetRef.name}'
+)
+if [[ ${hpa_target} != worker ]]; then
+  echo "Worker HPA is missing or targets ${hpa_target:-nothing}." >&2
+  exit 1
+fi
 
 ready_workers=$(
   kubectl -n "${namespace}" get deployment worker \
@@ -80,7 +91,7 @@ fi
 
 echo "Kubernetes deployment verified."
 echo "Node: ${node_name} (${node_ip}) Ready"
-echo "Workers: ${ready_workers}; Redis pending: ${pending_count}; lag: ${queue_lag}"
+echo "Workers: ${ready_workers}; autoscaler: Ready; Redis pending: ${pending_count}; lag: ${queue_lag}"
 echo "Database revision: ${database_revision}"
 echo "Frontend: http://${node_ip}:30080"
 echo "API docs: http://${node_ip}:30800/docs"

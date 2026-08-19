@@ -10,6 +10,7 @@ resources:
   - migration.yaml
   - api.yaml
   - worker.yaml
+  - worker-autoscaler.yaml
   - frontend.yaml
 labels:
   - pairs:

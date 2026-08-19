@@ -18,20 +18,20 @@ GitHub Actions ──测试并构建──► GHCR 前后端镜像
                               PostgreSQL ◄───────────────┤
                               Redis Streams ◄────────────┤
                                                         ▼
-                                              Worker Pod × 2
+                                        KEDA/HPA ──► Worker Pod × 1～6
 ```
 
 - GitHub Actions 运行测试，并将 backend/frontend 镜像推送到 GHCR。
 - kubeadm 在物理机上创建 Kubernetes control plane。
 - Calico 为 Pod 提供容器网络。
 - API 只接收请求并把任务写入 Redis Streams。
-- 两个 Worker 竞争消费任务，Pod 被删除后由 Deployment 自动补齐。
+- KEDA 根据 Redis Streams lag 将 Worker 自动扩缩到 1～6 个副本。
 - PostgreSQL 保存用户、会话、消息和任务状态。
 - Redis DB 0 保存任务队列，DB 1 保存所有 Worker 共享的 AkShare 缓存。
 - PostgreSQL、Redis 和图表文件使用宿主机本地持久卷。
 - Alembic migration Job 在应用启动前将数据库升级到目标版本。
 
-这一步尚未实现基于队列积压量的自动扩缩；当前 Worker 副本数固定为 2。
+扩缩容的指标、参数和实测结果见 [Worker 弹性扩缩说明](worker-autoscaling.md)。
 
 ## 2. 当前物理机绑定参数
 
@@ -137,9 +137,10 @@ Kubernetes control plane and Calico are ready.
 1. 创建 namespace。
 2. 生成 PostgreSQL 密码和 JWT Secret；再次部署时复用原值。
 3. 根据 `.deployment.env` 创建 GHCR imagePullSecret。
-4. 创建本地 PV/PVC、PostgreSQL、Redis、API、两个 Worker 和 Frontend。
+4. 安装 KEDA，并创建本地 PV/PVC、PostgreSQL、Redis、API、Worker 和 Frontend。
 5. 运行一次 Alembic migration Job。
-6. 等待全部 StatefulSet、Deployment 和 migration Job 成功。
+6. 创建基于 Redis Streams lag 的 ScaledObject 和 HPA。
+7. 等待全部 StatefulSet、Deployment、ScaledObject 和 migration Job 成功。
 
 ### 4.6 一键验证
 
@@ -150,9 +151,10 @@ Kubernetes control plane and Calico are ready.
 该脚本只读取状态，不提交 Agent 请求，也不会产生模型费用。它会检查：
 
 - 节点是否 Ready；
-- PostgreSQL、Redis、API、两个 Worker 和 Frontend 是否就绪；
+- PostgreSQL、Redis、API、空闲基线 1 个 Worker 和 Frontend 是否就绪；
 - Alembic revision 是否为 `20260819_03`；
-- Redis 是否有两个 consumer，且 `pending=0、lag=0`；
+- KEDA ScaledObject 和 HPA 是否正确控制 Worker；
+- Redis 是否有一个空闲 consumer，且 `pending=0、lag=0`；
 - 前端和 API NodePort 是否返回 HTTP 200。
 
 访问地址：
@@ -181,6 +183,9 @@ Kubernetes control plane and Calico are ready.
 control-plane 的 `NoSchedule` 污点被保留。项目的业务 Pod 都显式声明 toleration，因此
 可以调度到这一个 control-plane 节点。
 
+KEDA 不是宿主机软件，而是由 `deploy-kubernetes.sh` 通过 `install-keda.sh` 安装的
+集群级组件，包括 CRD、Operator、Metrics API Server 和 Admission Webhook。
+
 ## 6. 日常更新与排查
 
 代码修改后的发布流程：
@@ -192,11 +197,21 @@ git push origin HEAD
 ./scripts/verify-kubernetes.sh
 ```
 
+需要验证弹性扩缩时运行：
+
+```bash
+./scripts/test-worker-autoscaling.sh
+```
+
+该测试默认提交 12 个真实 Agent 任务，会调用已配置的大模型；成功后默认删除测试
+会话。可以通过 `TASK_COUNT` 调整数量。
+
 常用状态与日志命令：
 
 ```bash
 kubectl get nodes -o wide
 kubectl -n ashare-agent get pods -o wide
+kubectl -n ashare-agent get scaledobject,hpa
 kubectl -n ashare-agent get events --sort-by=.lastTimestamp
 kubectl -n ashare-agent logs deployment/api --tail=200
 kubectl -n ashare-agent logs deployment/worker --all-pods --tail=200
@@ -235,6 +250,8 @@ kubectl -n ashare-agent exec postgres-0 -- sh -c \
 kubectl delete namespace ashare-agent
 ```
 
+该命令不会删除集群级 KEDA 组件；KEDA 可以继续供同一集群中的其他 namespace 使用。
+
 `kubeadm reset`、删除 `/var/lib/ashare-agent` 或删除 `/var/lib/etcd` 都属于破坏性操作。
 不要把它们当作普通的“停止服务”命令；确实要卸载整个集群或销毁数据时，应先备份并
 单独确认操作范围。
@@ -243,6 +260,6 @@ kubectl delete namespace ashare-agent
 
 - 单节点故障会导致整个集群不可用，不具备生产级高可用能力。
 - local PV 固定绑定 `inc-zzy`，不能迁移到其他节点。
-- Worker 当前固定为两个副本，尚未接入 KEDA/HPA。
+- Worker 最大副本数受单节点资源限制；当前上限为 6。
 - 分支镜像标签可变；严格发布流程应改用 `sha-*` 标签或 image digest。
 - NodePort 和 UFW 规则面向内网实验环境，尚未配置 Ingress、TLS 和域名。

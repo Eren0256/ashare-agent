@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: worker
 spec:
-  replicas: 2
+  minReadySeconds: 5
   selector:
     matchLabels:
       app.kubernetes.io/name: worker
@@ -13,7 +13,7 @@ spec:
         app.kubernetes.io/name: worker
         app.kubernetes.io/component: runtime
     spec:
-      terminationGracePeriodSeconds: 120
+      terminationGracePeriodSeconds: 600
       automountServiceAccountToken: false
       imagePullSecrets:
         - name: ghcr-credentials

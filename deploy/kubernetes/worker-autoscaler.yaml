@@ -1,0 +1,45 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-autoscaler
+spec:
+  scaleTargetRef:
+    name: worker
+    envSourceContainerName: worker
+  pollingInterval: 5
+  cooldownPeriod: 60
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  fallback:
+    failureThreshold: 3
+    replicas: 1
+  advanced:
+    horizontalPodAutoscalerConfig:
+      name: worker-autoscaler
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          selectPolicy: Max
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 15
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 120
+          selectPolicy: Max
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+  triggers:
+    - type: redis-streams
+      metricType: AverageValue
+      metadata:
+        address: redis.ashare-agent.svc.cluster.local:6379
+        stream: ashare-agent:jobs
+        consumerGroup: ashare-agent-workers
+        lagCount: "1"
+        activationLagCount: "1"
