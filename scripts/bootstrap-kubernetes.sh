@@ -15,7 +15,19 @@ login_gid=$(id -g "${login_user}")
 
 kubernetes_minor=v1.36
 calico_version=v3.32.1
+node_name=inc-zzy
+node_interface=enp0s31f6
 node_ip=10.192.54.98
+
+actual_node_ip=$(
+  ip -4 -o address show dev "${node_interface}" scope global \
+    | awk 'NR == 1 {split($4, address, "/"); print address[1]}'
+)
+if [[ ${actual_node_ip} != "${node_ip}" ]]; then
+  echo "Expected ${node_interface} to use ${node_ip}, found ${actual_node_ip:-none}." >&2
+  echo "Update the cluster configuration before running this host-specific script." >&2
+  exit 1
+fi
 
 swapoff -a
 if grep -qE '^/swapfile[[:space:]]' /etc/fstab; then
@@ -51,6 +63,11 @@ apt-get install -y kubelet kubeadm kubectl
 apt-mark hold kubelet kubeadm kubectl
 
 install -d -m 0755 /etc/containerd
+if [[ -f /etc/containerd/config.toml ]] \
+  && [[ ! -e /etc/containerd/config.toml.before-kubernetes ]]; then
+  cp --preserve=all /etc/containerd/config.toml \
+    /etc/containerd/config.toml.before-kubernetes
+fi
 containerd config default > /etc/containerd/config.toml.tmp
 sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' \
   /etc/containerd/config.toml.tmp
@@ -99,10 +116,10 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
   if kubectl --kubeconfig=/etc/kubernetes/admin.conf \
     get --raw=/readyz >/dev/null 2>&1; then
     if kubectl --kubeconfig=/etc/kubernetes/admin.conf \
-      get node inc-zzy >/dev/null 2>&1; then
+      get node "${node_name}" >/dev/null 2>&1; then
       cluster_initialized=true
     else
-      echo "Recovering an incomplete kubeadm initialization: API is ready, but node inc-zzy is absent."
+      echo "Recovering an incomplete kubeadm initialization: API is ready, but node ${node_name} is absent."
       kubeadm reset --force --cri-socket=unix:///run/containerd/containerd.sock
     fi
   else
@@ -148,6 +165,6 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 kubectl wait --for=condition=Available tigerastatus/calico --timeout=10m
-kubectl wait --for=condition=Ready node/inc-zzy --timeout=10m
+kubectl wait --for=condition=Ready "node/${node_name}" --timeout=10m
 
 echo "Kubernetes control plane and Calico are ready."
