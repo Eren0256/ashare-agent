@@ -94,7 +94,36 @@ install -d -o 70 -g 70 -m 0700 /var/lib/ashare-agent/postgres
 install -d -o 999 -g 1000 -m 0770 /var/lib/ashare-agent/redis
 install -d -o 10001 -g 10001 -m 0770 /var/lib/ashare-agent/artifacts
 
-if [[ ! -f /etc/kubernetes/admin.conf ]]; then
+cluster_initialized=false
+if [[ -f /etc/kubernetes/admin.conf ]]; then
+  if kubectl --kubeconfig=/etc/kubernetes/admin.conf \
+    get --raw=/readyz >/dev/null 2>&1; then
+    if kubectl --kubeconfig=/etc/kubernetes/admin.conf \
+      get node inc-zzy >/dev/null 2>&1; then
+      cluster_initialized=true
+    else
+      echo "Recovering an incomplete kubeadm initialization: API is ready, but node inc-zzy is absent."
+      kubeadm reset --force --cri-socket=unix:///run/containerd/containerd.sock
+    fi
+  else
+    echo "/etc/kubernetes/admin.conf exists, but the API server is not ready." >&2
+    echo "Refusing to reset automatically; inspect the control plane first." >&2
+    exit 1
+  fi
+fi
+
+if [[ ${cluster_initialized} == false ]]; then
+  # A kubelet client certificate left by another cluster is rejected by the
+  # new API server as Unauthorized. Archive any remaining kubelet PKI before
+  # kubeadm creates credentials for this cluster.
+  systemctl stop kubelet
+  if [[ -d /var/lib/kubelet/pki ]]; then
+    backup_dir=/var/backups/ashare-agent
+    backup_suffix=$(date +%Y%m%d%H%M%S)
+    install -d -m 0700 "${backup_dir}"
+    mv /var/lib/kubelet/pki \
+      "${backup_dir}/kubelet-pki-before-${backup_suffix}"
+  fi
   kubeadm init --config "${cluster_dir}/kubeadm-config.yaml"
 fi
 
