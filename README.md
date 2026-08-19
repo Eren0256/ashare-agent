@@ -6,6 +6,40 @@
 python -m pip install -r requirements-dev.txt
 ```
 
+## Docker Compose 启动（推荐）
+
+先创建本地配置，并在 `ashare_agent/config/.env` 中填写大模型配置：
+
+```bash
+cp --no-clobber ashare_agent/config/.env.example ashare_agent/config/.env
+```
+
+然后构建并启动完整环境：
+
+```bash
+docker compose up --build --scale worker=2 -d
+docker compose ps
+```
+
+浏览器访问 `http://127.0.0.1:3000`，API 文档位于
+`http://127.0.0.1:8000/docs`。查看 Worker 日志：
+
+```bash
+docker compose logs -f worker
+```
+
+停止服务但保留 PostgreSQL、Redis 和图表数据：
+
+```bash
+docker compose down
+```
+
+仅在确定需要删除全部容器数据时才执行：
+
+```bash
+docker compose down -v
+```
+
 ## 启动 Redis
 
 首次启动：
