@@ -125,8 +125,19 @@ class AgentWorker:
         await self._queue.start()
 
     async def shutdown(self) -> None:
-        await self._queue.close()
-        await self._repository.close()
+        try:
+            await self._queue.unregister_consumer(self._consumer_name)
+        except Exception:
+            logger.warning(
+                "Failed to unregister worker %s",
+                self._consumer_name,
+                exc_info=True,
+            )
+        finally:
+            try:
+                await self._queue.close()
+            finally:
+                await self._repository.close()
 
     async def run(self, stop_event: asyncio.Event) -> None:
         await self.start()

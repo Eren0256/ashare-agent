@@ -99,6 +99,29 @@ def test_job_stays_queued_until_worker_consumes_it(tmp_path):
     asyncio.run(scenario())
 
 
+def test_worker_unregisters_consumer_during_graceful_shutdown(tmp_path):
+    async def scenario() -> None:
+        repository = ApplicationRepository(
+            sqlite_test_database(tmp_path / "app.sqlite3")
+        )
+        queue = MemoryJobQueue()
+        worker = AgentWorker(
+            repository,
+            StaticRuntime("回答"),
+            queue,
+            consumer_name="worker-terminating",
+            block_ms=0,
+        )
+        stop_event = asyncio.Event()
+        stop_event.set()
+
+        await worker.run(stop_event)
+
+        assert queue.unregistered_consumers == ["worker-terminating"]
+
+    asyncio.run(scenario())
+
+
 def test_two_workers_compete_without_duplicate_execution(tmp_path):
     async def scenario() -> None:
         repository = ApplicationRepository(

@@ -40,6 +40,40 @@ docker compose down
 docker compose down -v
 ```
 
+## 单节点 Kubernetes 部署
+
+推送分支后，GitHub Actions 会将前后端镜像发布到 GHCR，同时生成分支标签和
+`sha-*` 标签。本机部署使用 `feat-k8s-elastic-runtime` 分支标签。
+
+复制本地部署凭据文件并填写具有 `read:packages` 权限的 GitHub classic PAT：
+
+```bash
+cp --no-clobber .deployment.env.example .deployment.env
+```
+
+首次初始化物理机上的 Kubernetes 1.36、containerd 和 Calico 3.32.1：
+
+```bash
+sudo -E ./scripts/bootstrap-kubernetes.sh
+```
+
+脚本保留 control-plane 污点，业务 Pod 通过 toleration 调度到该节点。PostgreSQL、
+Redis 和图表数据分别保存在 `/var/lib/ashare-agent` 下的本地持久卷中。
+
+发布应用：
+
+```bash
+./scripts/deploy-kubernetes.sh
+kubectl -n ashare-agent get pods -o wide
+```
+
+访问地址：
+
+```text
+前端：http://10.192.54.98:30080
+API文档：http://10.192.54.98:30800/docs
+```
+
 ## 启动 Redis
 
 首次启动：

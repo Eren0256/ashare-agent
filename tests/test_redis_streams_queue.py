@@ -78,6 +78,11 @@ def test_redis_streams_distributes_and_reclaims_jobs():
             assert reclaimed.reclaimed is True
             await queues[1].acknowledge(reclaimed.message_id)
             assert await cleanup.xlen(stream) == 0
+            await asyncio.gather(
+                queues[0].unregister_consumer("worker-1"),
+                queues[1].unregister_consumer("worker-2"),
+            )
+            assert await cleanup.xinfo_consumers(stream, group) == []
         finally:
             await cleanup.delete(stream)
             await asyncio.gather(*(queue.close() for queue in queues))

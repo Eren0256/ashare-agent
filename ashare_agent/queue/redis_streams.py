@@ -83,6 +83,15 @@ class RedisStreamsJobQueue:
         )
         await self._client.xdel(self._stream, message_id)
 
+    async def unregister_consumer(self, consumer_name: str) -> None:
+        if not consumer_name:
+            raise ValueError("consumer_name cannot be empty")
+        await self._client.xgroup_delconsumer(
+            self._stream,
+            self._consumer_group,
+            consumer_name,
+        )
+
     async def close(self) -> None:
         await self._client.aclose()
         self._started = False

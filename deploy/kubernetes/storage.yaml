@@ -1,0 +1,124 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ashare-local
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ashare-postgres-data
+  labels:
+    app.kubernetes.io/component: postgres
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ashare-local
+  local:
+    path: /var/lib/ashare-agent/postgres
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - inc-zzy
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ashare-redis-data
+  labels:
+    app.kubernetes.io/component: redis
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ashare-local
+  local:
+    path: /var/lib/ashare-agent/redis
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - inc-zzy
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ashare-chart-artifacts
+  labels:
+    app.kubernetes.io/component: artifacts
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ashare-local
+  local:
+    path: /var/lib/ashare-agent/artifacts
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - inc-zzy
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: ashare-local
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: postgres
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: ashare-local
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: redis
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chart-artifacts
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ashare-local
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: artifacts

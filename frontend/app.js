@@ -922,6 +922,9 @@ function getApiBase() {
   if (configured) {
     return configured.replace(/\/$/, "");
   }
+  if (window.ASHARE_AGENT_API_BASE) {
+    return window.ASHARE_AGENT_API_BASE.replace(/\/$/, "");
+  }
   const host = window.location.hostname || "127.0.0.1";
   return `${window.location.protocol}//${host}:8000`;
 }

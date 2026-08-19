@@ -19,6 +19,7 @@ class MemoryJobQueue:
         self._next_id = 1
         self._lock = Lock()
         self.acknowledged: list[str] = []
+        self.unregistered_consumers: list[str] = []
 
     async def start(self) -> None:
         return None
@@ -53,6 +54,9 @@ class MemoryJobQueue:
 
     async def close(self) -> None:
         return None
+
+    async def unregister_consumer(self, consumer_name: str) -> None:
+        self.unregistered_consumers.append(consumer_name)
 
     def redeliver_pending(self) -> None:
         with self._lock:
