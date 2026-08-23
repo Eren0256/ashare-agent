@@ -1,0 +1,119 @@
+name: ashare-agent
+
+x-backend-environment: &backend-environment
+  DATABASE_URL: postgresql+asyncpg://ashare_agent:ashare_agent@postgres:5432/ashare_agent
+  DATABASE_AUTO_CREATE_SCHEMA: "false"
+  REDIS_URL: redis://redis:6379/0
+  CACHE_REDIS_URL: redis://redis:6379/1
+  CHART_ARTIFACT_DIR: /app/.artifacts/charts
+
+x-backend: &backend
+  image: ashare-agent-backend:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - ./ashare_agent/config/.env
+  environment: *backend-environment
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ashare_agent
+      POSTGRES_PASSWORD: ashare_agent
+      POSTGRES_DB: ashare_agent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ashare_agent -d ashare_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend
+    command:
+      - uvicorn
+      - ashare_agent.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - chart-artifacts:/app/.artifacts/charts
+    restart: unless-stopped
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "ashare_agent.worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      - chart-artifacts:/app/.artifacts/charts
+    restart: unless-stopped
+
+  frontend:
+    image: ashare-agent-frontend:local
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "${FRONTEND_PORT:-3000}:8080"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  chart-artifacts:

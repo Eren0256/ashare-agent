@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+.cache
+.data
+_data
+.artifacts
+.pytest_cache
+__pycache__
+*.py[cod]
+*.sqlite3
+ashare_agent/config/.env
+frontend
+tests

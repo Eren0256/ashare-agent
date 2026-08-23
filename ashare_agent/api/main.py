@@ -1,5 +1,4 @@
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from fastapi import (
@@ -211,7 +210,10 @@ def create_app(
         )
         if artifact is None:
             raise HTTPException(status_code=404, detail="图片不存在。")
-        path = Path(artifact.file_path)
+        try:
+            path = _container(request).artifacts.resolve(artifact.storage_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="图片文件不存在。") from exc
         if not path.is_file():
             raise HTTPException(status_code=404, detail="图片文件不存在。")
         return FileResponse(

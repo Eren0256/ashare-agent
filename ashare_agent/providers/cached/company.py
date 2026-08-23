@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Protocol
 
@@ -31,7 +30,6 @@ class CachedCompanyProvider:
         self._provider = provider
         self._cache = cache
         self._ttl_seconds = ttl_seconds
-        self._refresh_locks: dict[str, asyncio.Lock] = {}
 
     async def get_business(
         self,
@@ -43,12 +41,7 @@ class CachedCompanyProvider:
         if cached is not None:
             return cached
 
-        refresh_lock = self._refresh_locks.setdefault(
-            key,
-            asyncio.Lock(),
-        )
-
-        async with refresh_lock:
+        async with self._cache.lock(key):
             cached = await self._load_cached(key, security.code)
 
             if cached is not None:

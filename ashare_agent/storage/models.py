@@ -1,4 +1,5 @@
 from enum import Enum
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -23,8 +24,8 @@ class SessionRecord(BaseModel):
     id: str
     user_id: str
     title: str
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class MessageRecord(BaseModel):
@@ -34,7 +35,7 @@ class MessageRecord(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     metadata: dict[str, Any] = Field(default_factory=dict)
-    created_at: str
+    created_at: datetime
 
 
 class ArtifactRecord(BaseModel):
@@ -46,11 +47,11 @@ class ArtifactRecord(BaseModel):
     user_id: str
     title: str
     mime_type: str
-    file_path: str
+    storage_key: str
     width: int
     height: int
     chart_type: str
-    created_at: str
+    created_at: datetime
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -76,9 +77,9 @@ class JobRecord(BaseModel):
     assistant_message_id: str | None = None
     error: str | None = None
     error_type: str | None = None
-    created_at: str
-    started_at: str | None = None
-    completed_at: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     artifacts: list[ArtifactRecord] = Field(default_factory=list)
 
 

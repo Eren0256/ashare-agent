@@ -6,3 +6,5 @@ ashare_agent/config/.env
 .artifacts/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.deployment.env

@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Protocol
 
@@ -27,7 +26,6 @@ class CachedSecurityProvider:
         self._provider = provider
         self._cache = cache
         self._ttl_seconds = ttl_seconds
-        self._refresh_lock = asyncio.Lock()
 
     async def list_securities(
         self,
@@ -37,9 +35,9 @@ class CachedSecurityProvider:
         if cached is not None:
             return cached
 
-        async with self._refresh_lock:
+        async with self._cache.lock(SECURITY_LIST_CACHE_KEY):
             # Double-check after taking the lock so concurrent cache misses
-            # only trigger one AkShare request in this process.
+            # only trigger one AkShare request across all workers.
             cached = await self._load_cached()
 
             if cached is not None:

@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 import sqlite3
@@ -14,6 +15,7 @@ class SqliteCacheStore:
         self._database_path = Path(database_path).expanduser()
         self._initialized = False
         self._initialize_lock = asyncio.Lock()
+        self._refresh_locks: dict[str, asyncio.Lock] = {}
 
     async def get(
         self,
@@ -56,6 +58,12 @@ class SqliteCacheStore:
     ) -> None:
         await self._ensure_initialized()
         await asyncio.to_thread(self._delete_sync, key)
+
+    @asynccontextmanager
+    async def lock(self, key: str):
+        refresh_lock = self._refresh_locks.setdefault(key, asyncio.Lock())
+        async with refresh_lock:
+            yield
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
